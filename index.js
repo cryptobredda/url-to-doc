@@ -1,6 +1,7 @@
 const axios = require('axios');
 const cheerio = require('cheerio');
 const fs = require('fs').promises;
+const path = require('path');
 const puppeteer = require('puppeteer');
 
 // Set to store visited URLs to avoid duplicates
@@ -69,6 +70,48 @@ function sanitizeHTML(html) {
     // Clean up excessive newlines while preserving intentional spacing
     text = text.replace(/\n{3,}/g, '\n\n');
     return text.trim();
+}
+
+function getPageTitle($) {
+    // Try to get the most relevant title
+    const h1 = $('h1').first().text().trim();
+    const title = $('title').text().trim();
+    const metaTitle = $('meta[property="og:title"]').attr('content');
+    
+    return h1 || title || metaTitle || 'index';
+}
+
+function sanitizeFilename(name) {
+    // Remove invalid characters and replace with dashes
+    return name.toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
+
+function createOutputPath(url, title) {
+    const urlObj = new URL(url);
+    // Create base folder name from domain
+    const baseFolder = sanitizeFilename(urlObj.hostname.replace(/^www\./, ''));
+    
+    // Create file name from title or path
+    let fileName = title ? sanitizeFilename(title) : 'index';
+    if (fileName === 'index' && urlObj.pathname !== '/') {
+        // Use path segments for filename if no title
+        fileName = sanitizeFilename(urlObj.pathname.split('/').filter(Boolean).join('-')) || 'index';
+    }
+    
+    return {
+        folder: baseFolder,
+        fileName: `${fileName}.md`
+    };
+}
+
+async function ensureDirectoryExists(dirPath) {
+    try {
+        await fs.mkdir(dirPath, { recursive: true });
+    } catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+    }
 }
 
 async function fetchHTML(url) {
@@ -150,61 +193,41 @@ function extractUrls(html, baseUrl) {
     return Array.from(urls);
 }
 
-function sanitizeFilename(url) {
-    try {
-        const urlObj = new URL(url);
-        // Get hostname without www and remove TLD
-        let filename = urlObj.hostname.replace(/^www\./, '').split('.')[0];
-        
-        // Add the first path segment if it exists
-        if (urlObj.pathname !== '/' && urlObj.pathname !== '') {
-            const pathSegment = urlObj.pathname.split('/')[1];
-            if (pathSegment) {
-                filename += '-' + pathSegment;
-            }
-        }
-        
-        // Remove any invalid filename characters
-        filename = filename.replace(/[^a-z0-9-]/gi, '-');
-        // Remove multiple consecutive dashes
-        filename = filename.replace(/-+/g, '-');
-        // Remove leading/trailing dashes
-        filename = filename.replace(/^-|-$/g, '');
-        
-        return filename.toLowerCase();
-    } catch (error) {
-        console.error('Error processing URL for filename:', error);
-        return 'webpage';
-    }
-}
-
-async function crawlUrl(startUrl, isRoot = true) {
+async function crawlUrl(startUrl, outputDir, isRoot = true) {
     if (visitedUrls.has(startUrl)) {
-        return '';
+        return;
     }
     
     console.log(`Crawling: ${startUrl}`);
     visitedUrls.add(startUrl);
     
     const html = await fetchHTML(startUrl);
-    if (!html) return '';
+    if (!html) return;
     
+    const $ = cheerio.load(html);
+    const title = getPageTitle($);
     const sanitizedText = sanitizeHTML(html);
-    let allText = `\n\n## Content from ${startUrl}\n\n${sanitizedText}\n\n---\n\n`;
+    
+    // Create output path
+    const { folder, fileName } = createOutputPath(startUrl, title);
+    const fullOutputDir = path.join(outputDir, folder);
+    await ensureDirectoryExists(fullOutputDir);
+    
+    // Save the content
+    const filePath = path.join(fullOutputDir, fileName);
+    const content = `# ${title}\n\nSource: ${startUrl}\n\n${sanitizedText}`;
+    await fs.writeFile(filePath, content);
+    console.log(`Saved: ${filePath}`);
     
     // Only crawl sub-pages if this is the root URL
     if (isRoot) {
         const urls = extractUrls(html, startUrl);
         
-        // Process all URLs in parallel for faster crawling
-        const subTexts = await Promise.all(
-            urls.map(url => crawlUrl(url, false))
+        // Process all URLs in parallel
+        await Promise.all(
+            urls.map(url => crawlUrl(url, outputDir, false))
         );
-        
-        allText += subTexts.join('\n');
     }
-    
-    return allText;
 }
 
 async function main() {
@@ -214,12 +237,11 @@ async function main() {
         process.exit(1);
     }
     
-    console.log('Starting crawler...');
-    const content = await crawlUrl(startUrl);
+    const outputDir = process.argv[3] || '.';
     
-    const filename = `${sanitizeFilename(startUrl)}.md`;
-    await fs.writeFile(filename, content);
-    console.log(`Crawling completed. Content saved to ${filename}`);
+    console.log('Starting crawler...');
+    await crawlUrl(startUrl, outputDir);
+    console.log('Crawling completed.');
 }
 
 main().catch(console.error);
