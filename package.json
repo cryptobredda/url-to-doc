@@ -1,0 +1,13 @@
+{
+  "name": "url-to-doc",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "axios": "^1.7.9",
+    "cheerio": "^1.0.0",
+    "puppeteer": "^23.11.1"
+  }
+}
